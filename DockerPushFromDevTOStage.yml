@@ -1,0 +1,98 @@
+parameters:
+  - name: 'enableSourceImageTag'
+    type: string
+
+  - name: 'targetContainerRegistry'
+    type: string
+
+  - name: 'sourceContainerRegistry'
+    type: string
+
+  - name : sourceRepositary
+    type: string
+    
+  - name : targetRepositary
+    type: string
+
+  - name: 'promoteImage'
+    type: boolean
+    default: true
+
+  - name: 'azureSubscriptionDev'
+    type: string
+
+  - name: 'azureSubscriptionStaging'
+    type: string
+
+
+
+steps:
+- ${{ if eq(parameters.enableSourceImageTag, 'No tag Present!') }}:
+  - task: AzurePowerShell@5
+    displayName: Get & Set the Latest Image of The ACR
+    inputs:      
+      azureSubscription: ${{ parameters.azureSubscriptionDev }}
+      ScriptType: 'InlineScript'
+      Inline: |
+        Write-Host "Container Registry Name ${{ parameters.sourceContainerRegistry }}"
+        $currentTime = get-date -Format "yyyy.MM.dd.T.HH.mm.ss"
+        Write-Host "CurrentTime:" $currentTime 
+        Connect-AzContainerRegistry -Name ${{ parameters.sourceContainerRegistry }}
+  
+        $PipelineTags= Get-AzContainerRegistryManifest -RegistryName ${{ parameters.sourceContainerRegistry }} -RepositoryName ${{ parameters.sourceRepositary }}
+        Write-Host $PipelineTags
+        Write-Host $PipelineTags.ManifestsAttributes.Count
+        if ($PipelineTags.ManifestsAttributes.Count -gt 0)
+        {
+          $PublishedImageTag = ($PipelineTags.ManifestsAttributes | sort-object -Property LastUpdateTime -Descending | select -First 1).Tags
+          $PublishedImageTag = $PublishedImageTag.Replace('latest','').Replace(' ','')
+          Write-Host $PublishedImageTag
+        }
+        else
+        {
+          Write-Host "No images found!"
+        }
+        Write-Host "Latest Published Image Tag :"  $PublishedImageTag
+        Write-Host "##vso[task.setvariable variable=sourceImageTag;]$PublishedImageTag"
+      FailOnStandardError: false
+      azurePowerShellVersion: LatestVersion
+      pwsh: true
+- ${{ else }}:
+  - powershell: |
+        Write-Host "##vso[task.setvariable variable=sourceImageTag;]${{ parameters.enableSourceImageTag }}"
+        Write-Host "Existing Image Tag :"  ${{ parameters.enableSourceImageTag }}
+
+- ${{ if eq(parameters.promoteImage, 'true') }}:
+  - task: AzureCLI@2
+    displayName: Import Image From Previous Registry
+    retryCountOnTaskFailure: 0
+    inputs:
+      azureSubscription: ${{ parameters.azureSubscriptionStaging }}
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        $tContainerRegistry = "${{ parameters.targetContainerRegistry }}"
+        $sImage = "${{ parameters.sourceContainerRegistry }}.azurecr.io/" + ${{ parameters.sourceRepositary }} + ":$(sourceImageTag)"
+        $tImage = ${{ parameters.sourceRepositary }} + ":$(sourceImageTag)"
+        $result = az acr repository show -n $tContainerRegistry --image $tImage
+        try{
+            if (-not $result) {
+              Write-Host "Image $tImage does not exist in $tContainerRegistry."
+              Write-Host "Importing image from $sImage..."
+              Write-Host "tContainerRegistry is ..." $env:ENVIRONMENT_CONTAINERREGISTRY
+              Write-Host "Importing image tag $(sourceImageTag)..."
+              Write-Host "UserName is ..." $userName
+              Write-Host "Password is ..." $password
+              az acr import --name $tContainerRegistry --source $sImage --image $tImage --username $userName --password $password
+            }
+            else {
+              Write-Host "Image $tImage already exists in $tContainerRegistry."
+            }
+        }
+        catch
+        {
+            Write-Host "The image is already present in the ACR in Staging subscription ..." $_
+        }
+    env:
+      SERVICE_PRINCIPAL_APPLICATION_ID: $(environment.sourceContainerRegistry.servicePrincipalApplicationId)
+      SERVICE_PRINCIPAL_CLIENT_AUTH: $(environment.sourceContainerRegistry.servicePrincipalClientAuth)
